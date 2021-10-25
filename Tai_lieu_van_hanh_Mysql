@@ -1,0 +1,270 @@
+Cấu hình master-Slave
+Dựng mysql master slave
+
+Ip master: 192.168.219.133/24
+Ip slave: 192.168.219.135/24
+
+Phải khai báo các hosts trong /etc/hosts
+
+
+Bước 1: Thao tác trên server master
+
+1.1 Cài mysql server 
+sudo apt-get install mysql-server
+1.2 Chỉnh sửa tệp cấu hình 
+# sudo nano /etc/mysql/mysql.conf.d/mysqld.cnf
+Thay đổi bind-address để các srv có thể gửi kết nối với nhau.
+bind-address = 127.0.0.1   ( 127.0.0.1 thành 0.0.0.0)
+(Trong ngữ cảnh của máy chủ, 0.0.0.0 có nghĩa là tất cả địa chỉ IPv4 trên máy cục bộ. Nếu một máy chủ có hai địa chỉ IP, 192.168.1.1 và 10.1.2.1 và một máy chủ đang chạy trên máy chủ lắng nghe  0.0.0.0, nó sẽ có thể truy cập được ở cả hai IP đó.)
+Thêm thông tin, vị trí các file hệ thống vào cuối 
+server-id = 1
+log_bin = /var/log/mysql/mysql-bin.log
+log_bin_index =/var/log/mysql/mysql-bin.log.index
+relay_log = /var/log/mysql/mysql-relay-bin
+relay_log_index = /var/log/mysql/mysql-relay-bin.index
+Log_bin: Chứa tất cả thông tin sao chép, tất cả thay đổi sẽ được ghi trong đây và các con slave sẽ sao chép từ nó.
+Restart lại dịch vụ systemctl restart mysql
+
+1.4 Tạo người dùng mới 
+
+sudo mysql -u root -p
+mysql > create user 'testuser'@’ip slave' identified by 'password';
+( Tạo user với mật khẩu)
+mysql > GRANT REPLICATION SLAVE ON *.* TO ‘testuser'@'ipslave';
+
+mysql > FLUSH PRIVILEGES;
+mysql> show master status;
+(xem thông tin về vị trí và tệp Máy chủ chính) 
+
+
+
+Cần ghi nhớ logfile ở đây là mysql-bin.000001 và log_position là 865
+Bước 2: Thao tác trên server slave
+
+Tương tự như server 1 (Đổi bind)
+Thêm thông tin 
+server-id = 2
+log_bin = /var/log/mysql/mysql-bin.log
+log_bin_index =/var/log/mysql/mysql-bin.log.index
+relay_log = /var/log/mysql/mysql-relay-bin
+relay_log_index = /var/log/mysql/mysql-relay-bin.index
+
+
+Thay đổi cấu hình 
+$ sudo mysql -u root -p
+
+
+mysql> stop slave; 
+mysql> CHANGE MASTER TO MASTER_HOST = '192.168.219.133', MASTER_USER = 'testuser', MASTER_PASSWORD = 'password', MASTER_LOG_FILE = 'mysql-bin.000001', MASTER_LOG_POS = 865;
+mysql > start slave;
+mysql > Quit;
+Bước 3 : Kiểm tra 
+Tạo 1 db trên server master sẽ thấy trên slave 
+
+
+
+Kết quả trên con slave
+
+Nếu ko thấy dữ liệu cập nhật thì vào check log trong var/log/mysql/error.log
+
+reported error: Authentication requires secure connection. Error_code: MY-002061
+2021-09-29T08:56:48.310244Z 9 [ERROR] [MY-010584] [Repl] Slave I/O for channel '': error connecting to master 'replication_user@172.16.223.130:3306' - retry-time: 60 retries: 13 message: Authentication plugin 'caching_sha2_password' reported error: Authentication requires secure connection. Error_code: MY-002061
+
+Fix:  stop slave ;
+CHANGE MASTER TO GET_MASTER_PUBLIC_KEY=1;
+Do thiếu khóa xác thực nên chỉ cần tạo 1 cặp khóa để xác thực là ok. (trên con slave)
+
+Dựng mysql master master
+Thực hiện các bước như dựng master slave nhưng trên con slave sẽ tạo user và add slave như trên con master
+ERROR 1098 (HY000): Can't generate a unique log-filename var/log/mysql/mysql-relay-bin.(1-999)
+Đứng trên server master chạy:
+	mysql -h 172.16.223.131 -u replication_user -p ( Nhập password)
+Đứng trên server slave chạy:
+mysql -h 172.16.223.130 -u replication_user -p ( Nhập password)
+
+Các thao tác trên hệ thống mysql cơ bản 
+
+Cách kiểm tra con nào là Master con nào là Slave
+Truy cập vào MySQL
+SELECT COUNT(1) SlaveThreadCount
+FROM information_schema.processlist
+WHERE user='system user';
+Nếu đầu ra SlaveThreadCount > 0 : Slave || == 0 sẽ là Master
+
+
+
+
+Backup
+Cách backup dữ liệu hàng ngày
+Sử dụng crontab 
+Để sử dụng cron, chỉnh sửa file /etc/crontab để thực thi tác vụ. Giả sử muốn sao lưu tất cả database vào 03:00 AM hàng ngày, thêm vào file /etc/crontab đoạn lệnh sau:
+# 0 3 * * * root mysqldump -u MySQLBackupUser -pMySQLPassword –all-databases > /dbbackup/all_databases.sql
+/etc/init.d/cron restart ( Reset lại )
+
+Restore
+
+Bước 1. Xuất bản backup từ Master 
+mysqldump -u root -p --all-databases > /a/path/mysqldump.sql
+
+
+Bước 2. Có thể nén , gửi bằng scp sang slave 
+Bước 3. Thao tác trên Slave
+STOP SLAVE;
+mysql -u root -p < mysqldump.sql
+( Import db )
+RESET SLAVE;
+
+File cấu hình SRV Master
+
+[client]
+port                = 3306
+socket                = /var/run/mysqld/mysqld.sock
+
+# This was formally known as [safe_mysqld]. Both versions are currently parsed.
+[mysqld_safe]
+socket                = /var/run/mysqld/mysqld.sock
+nice                = 0
+
+[mysqld]
+pid-file        = /var/run/mysqld/mysqld.pid
+socket                = /var/run/mysqld/mysqld.sock
+datadir                = /vcdata/metadata
+log-error        = /var/log/mysql/error.log
+tmpdir                = /tmp
+lc-messages-dir        = /usr/share/mysql
+skip-external-locking
+# By default we only accept connections from localhost
+bind-address        = 0.0.0.0
+# Disabling symbolic-links is recommended to prevent assorted security risks
+symbolic-links=0
+server-id=7
+binlog-do-db=frontend
+binlog-do-db=backend
+binlog-do-db=frontend_hosting
+log-bin=mysql-bin
+auto-increment-increment = 2
+auto-increment-offset = 2
+
+back_log = 50
+max_connections = 2500
+max_connect_errors = 100
+table_open_cache = 2048
+max_allowed_packet = 16M
+binlog_cache_size = 1M
+max_heap_table_size = 64M
+sort_buffer_size = 8M
+join_buffer_size = 8M
+query_cache_size = 64M
+query_cache_limit = 2M
+ft_min_word_len = 4
+default-storage-engine = InnoDB
+thread_stack = 192K
+transaction_isolation = READ-COMMITTED
+tmp_table_size = 64M
+binlog_format=mixed
+slow_query_log
+long_query_time = 2
+
+query_cache_limit        = 1M
+query_cache_size        = 16M
+innodb_data_file_path = ibdata1:10M:autoextend
+innodb-log-files-in-group      = 2
+innodb-flush-log-at-trx-commit = 1
+innodb-buffer-pool-size        = 15G
+innodb_read_io_threads = 64
+innodb_write_io_threads = 64
+innodb_io_capacity =  500
+innodb_log_file_size = 512M
+innodb_log_buffer_size = 16M
+innodb_thread_concurrency = 16
+innodb_flush_log_at_trx_commit = 2
+innodb_flush_method = O_DIRECT
+innodb_lock_wait_timeout = 120
+innodb_file_per_table
+innodb_log_files_in_group = 3
+innodb_max_dirty_pages_pct = 90
+
+key_buffer_size                = 16M
+max_allowed_packet        = 16M
+thread_stack                = 192K
+thread_cache_size       = 8
+
+myisam-recover-options        = BACKUP
+
+expire_logs_days        = 14
+max_binlog_size         = 100M
+
+[mysqldump]
+quick
+quote-names
+max_allowed_packet        = 16M
+
+
+[isamchk]
+key_buffer                = 16M
+
+File cấu hình của Slave
+
+[client]
+port = 3306 
+socket = /var/run/mysql/mysql.sock
+[mysqld]
+port = 3306
+datadir = /vcdata/metadata
+socket = /var/run/mysql/mysql.sock
+pid-file = /vcdata/metadata/mysql.pid
+log_error=/var/log/mysql/mysql_error.log
+
+query_cache_size =128M  
+query_cache_limit = 4M
+thread_cache_size = 4
+
+log-slave-updates = 1
+log-bin = mysql-bin
+binlog-do-db = metadata
+binlog-ignore-db = mysql
+binlog-ignore-db = test
+
+max_connections = 2500
+max_connect_errors = 10000
+binlog_format = mixed
+
+slow_query_log
+long_query_time = 2
+server-id = 15
+
+skip-slave-start
+auto-increment-increment = 2
+auto-increment-offset = 2
+expire_logs_days = 10
+
+innodb_additional_mem_pool_size = 20M
+innodb_buffer_pool_size = 24G
+innodb_change_buffering = all
+innodb_data_file_path = ibdata1:10M:autoextend
+innodb_thread_concurrency = 16
+innodb_read_io_threads = 64
+innodb_write_io_threads = 64
+innodb_io_capacity =  500
+innodb_log_file_size = 1536M
+innodb_log_buffer_size = 16M
+innodb_flush_log_at_trx_commit = 2
+innodb_flush_method = O_DIRECT
+innodb_lock_wait_timeout = 60
+innodb_file_per_table
+symbolic-links=0
+
+[mysqldump]
+quick
+max_allowed_packet = 16M
+
+[mysql]
+no-auto-rehash
+
+[mysqlhotcopy]
+interactive-timeout
+
+[mysqld_safe]
+open-files-limit = 81920
+log_error=/var/log/mysql/mysql_error.log
+
